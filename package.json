@@ -1,0 +1,25 @@
+{
+  "name": "pllay-sandbox-quickstart",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pllay/sandbox-quickstart.git"
+  },
+  "description": "Minimal Node + TypeScript client for the PLLAY settlement sandbox: create, lock, settle, poll, print the receipt.",
+  "type": "module",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.3"
+  }
+}
