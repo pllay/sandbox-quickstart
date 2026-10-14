@@ -23,16 +23,16 @@ function startReceiver(port: number, getSecret: () => string, onDelivery: (d: De
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
       const raw = Buffer.concat(chunks);
-      const verified = verifyWebhookSignature(raw, req.headers["x-webhook-signature"] as string | undefined, getSecret());
+      const verified = verifyWebhookSignature(raw, req.headers["x-pllay-signature"] as string | undefined, getSecret());
       if (!verified) {
         res.writeHead(401).end("bad signature");
-        onDelivery({ event: String(req.headers["x-webhook-event"] ?? "?"), verified: false, body: null });
+        onDelivery({ event: String(req.headers["x-pllay-event"] ?? "?"), verified: false, body: null });
         return;
       }
       res.writeHead(200).end("ok");
       let body: unknown = null;
       try { body = JSON.parse(raw.toString("utf8")); } catch { /* signed but not JSON: keep null */ }
-      onDelivery({ event: String(req.headers["x-webhook-event"] ?? "?"), verified: true, body });
+      onDelivery({ event: String(req.headers["x-pllay-event"] ?? "?"), verified: true, body });
     });
   });
   return new Promise((resolve) => server.listen(port, () => resolve(server)));
@@ -64,8 +64,7 @@ async function main(): Promise<number> {
 
   // Optional webhook receiver.
   let server: Server | null = null;
-  let registered: { partnerId: string; id: string } | null = null;
-  let secret = env("PLLAY_WEBHOOK_SECRET");
+    let secret = env("PLLAY_WEBHOOK_SECRET");
   const deliveries: Delivery[] = [];
   if (args.has("--webhook")) {
     const port = Number(env("PORT") || 8787);
@@ -75,14 +74,12 @@ async function main(): Promise<number> {
     });
     console.log(`webhook receiver listening on http://localhost:${port}`);
     const publicUrl = env("PLLAY_WEBHOOK_URL");
-    const partnerId = env("PLLAY_PARTNER_ID");
-    if (publicUrl && partnerId) {
-      const wh = await client.createWebhook(partnerId, "event.settled", publicUrl);
-      secret = wh.secret;
-      registered = { partnerId, id: wh.id };
-      console.log(`registered event.settled webhook ${wh.id} -> ${publicUrl} (removed again on exit)`);
+    if (publicUrl) {
+      const wh = await client.setWebhook(publicUrl);
+      secret = wh.webhook_secret;
+      console.log(`webhook URL set to ${publicUrl} (this replaces your partner's webhook URL and rotates its secret)`);
     } else if (!secret) {
-      console.error("--webhook: set PLLAY_WEBHOOK_URL + PLLAY_PARTNER_ID to register one now, or PLLAY_WEBHOOK_SECRET for one you registered already.");
+      console.error("--webhook: set PLLAY_WEBHOOK_URL to set your webhook URL now, or PLLAY_WEBHOOK_SECRET for one you set already.");
     }
   }
 
@@ -120,7 +117,6 @@ async function main(): Promise<number> {
     }
     return 1;
   } finally {
-    if (registered) await client.deleteWebhook(registered.partnerId, registered.id).catch(() => undefined);
     server?.close();
   }
 }

@@ -27,8 +27,8 @@ Or copy them into a local `.env` file and load it with your shell; `.env` is git
 |---|---|---|
 | `PLLAY_API_KEY` | yes | none |
 | `PLLAY_API_BASE` | for sandbox keys, yes | `https://api.pllay.io` |
-| `PLLAY_WEBHOOK_URL`, `PLLAY_PARTNER_ID` | `--webhook` only: register a webhook now (removed on exit) | none |
-| `PLLAY_WEBHOOK_SECRET` | `--webhook` only: the secret of a webhook you registered yourself | none |
+| `PLLAY_WEBHOOK_URL` | `--webhook` only: set your webhook URL now (replaces the current one and rotates its secret) | none |
+| `PLLAY_WEBHOOK_SECRET` | `--webhook` only: the secret of a webhook URL you already set | none |
 | `PORT` | `--webhook` only | `8787` |
 
 ## 3. Run
@@ -57,18 +57,18 @@ Supported adapters include `valorant_result.json`, `lol_result.json`, `fortnite_
 
 ## Webhooks
 
-PLLAY signs each delivery with the webhook's secret:
+Set your webhook URL with `PATCH /v1/webhooks` `{ "webhook_url": "https://…" }`. The response returns `webhook_secret` once; every URL change rotates it. PLLAY then sends `event.settled`, `event.held`, `event.voided` and `event.reversed`:
 
 ```
-X-Webhook-Signature: sha256=<hex HMAC-SHA256(secret, raw request body)>
-X-Webhook-Event:     event.settled
-X-PLLAY-Environment: sandbox
-X-PLLAY-Synthetic:   true
+X-Pllay-Event:          event.settled
+X-Pllay-Delivery:       <delivery id, stable across retries>
+X-Pllay-Signature:      t=<unix seconds>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>
+X-Pllay-Schema-Version: <n>
 ```
 
-Verify against the **raw** body before parsing it, using a constant-time compare (`verifyWebhookSignature` in `src/pllay.ts`). The receiver here answers 401 to anything that fails.
+Verify against the **raw** body before parsing it: recompute the HMAC over `"<t>.<body>"`, compare in constant time, and reject timestamps more than 5 minutes old (`verifyWebhookSignature` in `src/pllay.ts`). The receiver here answers 401 to anything that fails. De-duplicate on `X-Pllay-Delivery`.
 
-PLLAY has to reach the receiver, so `PLLAY_WEBHOOK_URL` must be public, for example a tunnel to `localhost:8787`. `PLLAY_PARTNER_ID` is the partner id you received with your key. Webhooks are delivered during the settle call, so `event.settled` usually arrives before the poll finishes.
+PLLAY has to reach the receiver, so `PLLAY_WEBHOOK_URL` must be public, for example a tunnel to `localhost:8787`. Deliveries are sent asynchronously after the event resolves, so one may arrive shortly after the poll finishes.
 
 ## Limits
 

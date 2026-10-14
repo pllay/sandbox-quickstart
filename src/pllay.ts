@@ -76,24 +76,24 @@ export class PllayClient {
     return (await this.call<Settlement>("GET", `/v1/events/${id}`)).data;
   }
 
-  /** Registers a webhook for one event type. The response carries the signing secret (shown once). */
-  async createWebhook(partnerId: string, eventType: string, url: string) {
-    return (await this.call<{ id: string; secret: string }>("POST", `/v1/partners/${partnerId}/webhooks`, { event_type: eventType, url })).data;
-  }
-
-  async deleteWebhook(partnerId: string, webhookId: string) {
-    await this.call("DELETE", `/v1/partners/${partnerId}/webhooks/${webhookId}`);
+  /** Sets the partner's webhook URL (PATCH /v1/webhooks). Rotates and returns the signing secret, shown once. */
+  async setWebhook(url: string) {
+    return (await this.call<{ webhook_url: string; webhook_secret: string }>("PATCH", "/v1/webhooks", { webhook_url: url }, { "Idempotency-Key": randomUUID() })).data;
   }
 }
 
 /**
- * PLLAY's webhook signature: X-Webhook-Signature = "sha256=" + hex(HMAC-SHA256(secret, raw request body)).
- * Verify against the RAW bytes, before JSON.parse, with a constant-time compare.
+ * PLLAY's webhook signature: X-Pllay-Signature = "t=<unix seconds>,v1=<hex HMAC-SHA256(secret, `${t}.${raw body}`)>".
+ * Verify against the RAW bytes, before JSON.parse, with a constant-time compare, and reject stale timestamps.
  */
-export function verifyWebhookSignature(rawBody: string | Buffer, header: string | null | undefined, secret: string): boolean {
+export function verifyWebhookSignature(rawBody: string | Buffer, header: string | null | undefined, secret: string, toleranceSeconds = 300): boolean {
   if (!header || !secret) return false;
-  const expected = "sha256=" + createHmac("sha256", secret).update(rawBody).digest("hex");
+  const m = /^t=(\d+),v1=([0-9a-f]+)$/.exec(header.trim());
+  if (!m) return false;
+  const t = Number(m[1]);
+  if (Math.abs(Date.now() / 1000 - t) > toleranceSeconds) return false;
+  const expected = createHmac("sha256", secret).update(`${t}.`).update(rawBody).digest("hex");
   const a = Buffer.from(expected);
-  const b = Buffer.from(header.trim());
+  const b = Buffer.from(m[2]);
   return a.length === b.length && timingSafeEqual(a, b);
 }
