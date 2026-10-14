@@ -1,8 +1,8 @@
 # PLLAY sandbox quickstart (Node + TypeScript)
 
-Submits a recorded match (clip URL + title adapter + market), polls until PLLAY resolves it, then prints the winner and the receipt link. With `--webhook` it also runs a tiny local receiver that verifies PLLAY's webhook signature.
+Creates an event, locks it, settles it, polls until it is settled, then prints the result and its receipt link. With `--webhook` it also runs a tiny local receiver that verifies PLLAY's webhook signature.
 
-**Sandbox: no cash moves and nothing is billed.** Sandbox jobs never run real Vision: PLLAY simulates the resolution in about 3 seconds (`simulated: true` on create, `model_version: "pllay-fake-vision-sandbox-v1"`). The clip URL is not fetched, so any https URL works. It is never a real outcome.
+**Sandbox: no cash moves and nothing is billed.** A sandbox settle is a dry run: if you send no outcome, PLLAY returns a deterministic synthetic one (`model_version: "pllay-sandbox-synthetic-v1"`, response header `X-PLLAY-Synthetic: true`). It is never a real outcome.
 
 Developer docs: <https://pllay.io/developers>
 
@@ -18,7 +18,7 @@ Sandbox keys only work on the **staging** API. Production (`https://api.pllay.io
 
 ```bash
 export PLLAY_API_KEY="pllay_sk_sandbox_…"          # read from the environment only; never printed
-export PLLAY_API_BASE="<staging API base URL>"
+export PLLAY_API_BASE="<staging API base URL>"   # the oracle-settlement function: https://<staging-ref>.supabase.co/functions/v1/oracle-settlement
 ```
 
 Or copy them into a local `.env` file and load it with your shell; `.env` is git-ignored.
@@ -27,8 +27,8 @@ Or copy them into a local `.env` file and load it with your shell; `.env` is git
 |---|---|---|
 | `PLLAY_API_KEY` | yes | none |
 | `PLLAY_API_BASE` | for sandbox keys, yes | `https://api.pllay.io` |
-| `PLLAY_WEBHOOK_URL` | `--webhook` only: set your webhook URL now (replaces the current one and rotates its secret) | none |
-| `PLLAY_WEBHOOK_SECRET` | `--webhook` only: the secret of a webhook URL you already set | none |
+| `PLLAY_WEBHOOK_URL`, `PLLAY_PARTNER_ID` | `--webhook` only: register a webhook now (removed on exit) | none |
+| `PLLAY_WEBHOOK_SECRET` | `--webhook` only: the secret of a webhook you registered yourself | none |
 | `PORT` | `--webhook` only | `8787` |
 
 ## 3. Run
@@ -37,47 +37,45 @@ Requires Node 18.17 or later.
 
 ```bash
 npm install
-npm start                 # submit -> poll -> result + receipt link
+npm start                 # create -> lock -> settle -> poll -> result + receipt link
 npm start -- --webhook    # also receive and verify event.settled
 ```
 
 Output ends with something like:
 
 ```
-created event … (processing, sandbox simulated)
-
 result:
-{ "event_id": "…", "state": "settled", "winner": "Sentinels", "confidence": 97,
-  "model_version": "pllay-fake-vision-sandbox-v1", "synthetic": true, "webhook": "not requested" }
+{ "event_id": "…", "state": "settled", "outcome": "yes", "confidence": 0.9712,
+  "model_version": "pllay-sandbox-synthetic-v1", "synthetic": true, "receipt_hash": "…", "webhook": true }
 
 receipt: https://pllay.io/receipt/<event_id>
 ```
 
-Supported adapters include `valorant_result.json`, `lol_result.json`, `fortnite_result.json`, `cs2_matchresult.json` and more (an unsupported one returns `422` listing them all). `market.kind` is `team`, `side` or `pov`, with at least two string options.
+The same event id always gets the same synthetic outcome. To test a specific branch, send your own `outcome` (`yes` / `no` / `void`), `confidence` and `model_version` in the settle body: the sandbox keeps them, and still flags the settle as synthetic.
 
 ## Webhooks
 
-Set your webhook URL with `PATCH /v1/webhooks` `{ "webhook_url": "https://…" }`. The response returns `webhook_secret` once; every URL change rotates it. PLLAY then sends `event.settled`, `event.held`, `event.voided` and `event.reversed`:
+PLLAY signs each delivery with the webhook's secret:
 
 ```
-X-Pllay-Event:          event.settled
-X-Pllay-Delivery:       <delivery id, stable across retries>
-X-Pllay-Signature:      t=<unix seconds>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>
-X-Pllay-Schema-Version: <n>
+X-Webhook-Signature: sha256=<hex HMAC-SHA256(secret, raw request body)>
+X-Webhook-Event:     event.settled
+X-PLLAY-Environment: sandbox
+X-PLLAY-Synthetic:   true
 ```
 
-Verify against the **raw** body before parsing it: recompute the HMAC over `"<t>.<body>"`, compare in constant time, and reject timestamps more than 5 minutes old (`verifyWebhookSignature` in `src/pllay.ts`). The receiver here answers 401 to anything that fails. De-duplicate on `X-Pllay-Delivery`.
+Verify against the **raw** body before parsing it, using a constant-time compare (`verifyWebhookSignature` in `src/pllay.ts`). The receiver here answers 401 to anything that fails.
 
-PLLAY has to reach the receiver, so `PLLAY_WEBHOOK_URL` must be public, for example a tunnel to `localhost:8787`. Deliveries are sent asynchronously after the event resolves, so one may arrive shortly after the poll finishes.
+PLLAY has to reach the receiver, so `PLLAY_WEBHOOK_URL` must be public, for example a tunnel to `localhost:8787`. `PLLAY_PARTNER_ID` is the partner id you received with your key. Webhooks are delivered during the settle call, so `event.settled` usually arrives before the poll finishes.
 
 ## Limits
 
-Per sandbox key: 60 requests per minute (`429 rate_limit_exceeded`) and 1,000 settles per UTC day (`429 sandbox_daily_limit_exceeded`, with `reset_in_seconds`).
+Per sandbox key: 60 requests per minute (`429 rate_limit_exceeded`) and 1,000 settles per UTC day (`429 sandbox_daily_limit_exceeded`, with `reset_in_seconds`). On create, `notional_minor` must be `0`.
 
 ## Notes
 
 - The client (`src/pllay.ts`) is a thin `fetch` wrapper with no runtime dependencies. Copy it into your own project if you like.
-- `GET /v1/events/{id}` returns the state and resolution. The public receipt page is `https://pllay.io/receipt/{event_id}`. Sandbox receipts are never anchored.
+- `GET /v1/events/{id}/receipt` returns the canonical receipt and its hash. Sandbox receipts are never anchored.
 
 ## License
 

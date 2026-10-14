@@ -1,4 +1,4 @@
-// PLLAY sandbox quickstart: submit a match, poll until settled, print the result and receipt link.
+// PLLAY sandbox quickstart: create an event, lock it, settle it, poll until settled, print the result and receipt link.
 //
 //   PLLAY_API_KEY=pllay_sk_sandbox_...  PLLAY_API_BASE=<staging API base URL>  npm start
 //   npm start -- --webhook      # also run a local receiver that verifies PLLAY's webhook signature (see README)
@@ -23,16 +23,16 @@ function startReceiver(port: number, getSecret: () => string, onDelivery: (d: De
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
       const raw = Buffer.concat(chunks);
-      const verified = verifyWebhookSignature(raw, req.headers["x-pllay-signature"] as string | undefined, getSecret());
+      const verified = verifyWebhookSignature(raw, req.headers["x-webhook-signature"] as string | undefined, getSecret());
       if (!verified) {
         res.writeHead(401).end("bad signature");
-        onDelivery({ event: String(req.headers["x-pllay-event"] ?? "?"), verified: false, body: null });
+        onDelivery({ event: String(req.headers["x-webhook-event"] ?? "?"), verified: false, body: null });
         return;
       }
       res.writeHead(200).end("ok");
       let body: unknown = null;
       try { body = JSON.parse(raw.toString("utf8")); } catch { /* signed but not JSON: keep null */ }
-      onDelivery({ event: String(req.headers["x-pllay-event"] ?? "?"), verified: true, body });
+      onDelivery({ event: String(req.headers["x-webhook-event"] ?? "?"), verified: true, body });
     });
   });
   return new Promise((resolve) => server.listen(port, () => resolve(server)));
@@ -43,7 +43,7 @@ async function pollUntilSettled(client: PllayClient, id: string, timeoutMs = 60_
   let delay = 500;
   for (;;) {
     const ev = await client.getEvent(id);
-    if (ev.state !== "processing" && ev.status !== "processing") return ev;
+    if (ev.state === "settled" || ev.state === "held" || ev.state === "voided" || ev.state === "reversed") return ev;
     if (Date.now() > deadline) throw new Error(`event ${id} still ${ev.state} after ${timeoutMs / 1000}s`);
     await sleep(delay);
     delay = Math.min(delay * 2, 5_000);
@@ -64,7 +64,8 @@ async function main(): Promise<number> {
 
   // Optional webhook receiver.
   let server: Server | null = null;
-    let secret = env("PLLAY_WEBHOOK_SECRET");
+  let registered: { partnerId: string; id: string } | null = null;
+  let secret = env("PLLAY_WEBHOOK_SECRET");
   const deliveries: Delivery[] = [];
   if (args.has("--webhook")) {
     const port = Number(env("PORT") || 8787);
@@ -74,26 +75,36 @@ async function main(): Promise<number> {
     });
     console.log(`webhook receiver listening on http://localhost:${port}`);
     const publicUrl = env("PLLAY_WEBHOOK_URL");
-    if (publicUrl) {
-      const wh = await client.setWebhook(publicUrl);
-      secret = wh.webhook_secret;
-      console.log(`webhook URL set to ${publicUrl} (this replaces your partner's webhook URL and rotates its secret)`);
+    const partnerId = env("PLLAY_PARTNER_ID");
+    if (publicUrl && partnerId) {
+      const wh = await client.createWebhook(partnerId, "event.settled", publicUrl);
+      secret = wh.secret;
+      registered = { partnerId, id: wh.id };
+      console.log(`registered event.settled webhook ${wh.id} -> ${publicUrl} (removed again on exit)`);
     } else if (!secret) {
-      console.error("--webhook: set PLLAY_WEBHOOK_URL to set your webhook URL now, or PLLAY_WEBHOOK_SECRET for one you set already.");
+      console.error("--webhook: set PLLAY_WEBHOOK_URL + PLLAY_PARTNER_ID to register one now, or PLLAY_WEBHOOK_SECRET for one you registered already.");
     }
   }
 
   try {
     const created = await client.createEvent({
-      video_url: `https://example.com/pllay-quickstart/${Date.now()}.mp4`,
-      adapter: "valorant_result.json",
-      game_slug: "valorant",
-      market: { kind: "team", options: ["Sentinels", "Fnatic"] },
+      type: "promo",
+      path: "vod",
+      threshold: 0.8,
+      spec: { title: "Sandbox quickstart", question: "Did player A win the recorded match?" },
     });
-    const synthetic = created.simulated === true;
-    console.log(`created event ${created.event_id} (${created.status}${synthetic ? ", sandbox simulated" : ""})`);
+    console.log(`created event ${created.event_id} (${created.state})`);
+    await client.lockEvent(created.event_id);
+    console.log("locked");
+
+    // Sandbox: an empty body asks PLLAY for a deterministic synthetic outcome. A production key must send
+    // { outcome, confidence, model_version }.
+    const settleBody = client.isSandboxKey ? {} : { outcome: "yes", confidence: 0.95, model_version: "quickstart-1" };
+    const { synthetic } = await client.settleEvent(created.event_id, settleBody);
+    console.log(`settle requested${synthetic ? " (synthetic sandbox outcome)" : ""}`);
 
     const ev = await pollUntilSettled(client, created.event_id);
+    const receipt = await client.getReceipt(created.event_id).catch(() => null);
 
     if (server) {
       const until = Date.now() + 10_000;
@@ -102,8 +113,9 @@ async function main(): Promise<number> {
 
     console.log("\nresult:");
     console.log(JSON.stringify({
-      event_id: ev.event_id, state: ev.state, winner: ev.resolution?.outcome_label ?? null,
-      confidence: ev.resolution?.confidence ?? null, model_version: ev.resolution?.model_version ?? null, synthetic,
+      event_id: ev.event_id, state: ev.state, outcome: ev.outcome, confidence: ev.confidence, model_version: ev.model_version,
+      settlement_id: ev.settlement_id, evidence_uri: ev.evidence_uri, synthetic,
+      receipt_hash: (receipt as { receipts?: Array<{ receipt_hash?: string }> } | null)?.receipts?.[0]?.receipt_hash ?? null,
       webhook: server ? (deliveries.find((d) => d.event === "event.settled")?.verified ?? "not received") : "not requested",
     }, null, 2));
     console.log(`\nreceipt: ${RECEIPT_BASE}/${ev.event_id}`);
@@ -117,6 +129,7 @@ async function main(): Promise<number> {
     }
     return 1;
   } finally {
+    if (registered) await client.deleteWebhook(registered.partnerId, registered.id).catch(() => undefined);
     server?.close();
   }
 }

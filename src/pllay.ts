@@ -1,34 +1,27 @@
-// Thin fetch wrapper over the PLLAY settlement API (submit, poll, webhooks). This is the whole
+// Thin fetch wrapper over the PLLAY settlement API (create, lock, settle, poll, receipt, webhooks). This is the whole
 // client: no dependencies, Node 18+ global fetch.
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
-export type EventState = "processing" | "held" | "settled" | "voided" | "reversed";
+export type EventState = "open" | "locked" | "held" | "settled" | "reversed" | "voided";
 
-/** GET /v1/events/{id} (Resolution API v1). */
+/** The Settlement shape every event route returns (openapi.yaml components.schemas.Event). */
 export interface Settlement {
   event_id: string;
-  status: string;
+  type: "promo" | "contest" | "duel";
+  path: "vod" | "live";
   state: EventState;
-  external_market_id: string | null;
-  resolution: {
-    outcome_option_index: number | null;
-    outcome_label: string | null;
-    tier: string;
-    settleable: boolean;
-    confidence: number | null;
-    model_version: string | null;
-    adapter_version: string | null;
-    resolved_at: string | null;
-    latency_ms: number | null;
-  } | null;
-}
-
-export interface EventInput {
-  video_url: string;            // https URL of the recorded match clip
-  adapter: string;              // title adapter, e.g. "valorant_result.json"
-  game_slug?: string;
-  market: { kind: "pov" | "side" | "team"; options: string[] };
-  external_market_id?: string;
+  spec: Record<string, unknown>;
+  outcome: string | null;
+  confidence: number | null;
+  threshold: number;
+  model_version: string | null;
+  evidence_uri: string | null;
+  settlement_id: string | null;
+  reversal_settlement_id: string | null;
+  reviewer_id: string | null;
+  stake_ref: string | null;
+  notional_minor: number;
+  reason: string | null;
 }
 
 export class PllayApiError extends Error {
@@ -67,33 +60,50 @@ export class PllayClient {
     return { data: data as T, headers: res.headers };
   }
 
-  /** Submits a match for resolution. Idempotency-Key is required; a fresh one is generated per call. */
-  async createEvent(input: EventInput) {
-    return (await this.call<{ event_id: string; status: string; simulated?: boolean }>("POST", "/v1/events", input, { "Idempotency-Key": randomUUID() })).data;
+  /** Creates an event. Idempotency-Key is required by the API; a fresh one is generated per call. */
+  async createEvent(input: { type: Settlement["type"]; path: Settlement["path"]; threshold: number; spec: Record<string, unknown>; notional_minor?: number }) {
+    return (await this.call<Settlement>("POST", "/v1/events", { notional_minor: 0, ...input }, { "Idempotency-Key": randomUUID() })).data;
+  }
+
+  async lockEvent(id: string) {
+    return (await this.call<Settlement>("POST", `/v1/events/${id}/lock`, {})).data;
+  }
+
+  /**
+   * Settles an event. With a sandbox key the body may be empty: PLLAY then returns a deterministic synthetic outcome
+   * (X-PLLAY-Synthetic: true). With a production key outcome, confidence and model_version are required.
+   */
+  async settleEvent(id: string, body: Record<string, unknown> = {}) {
+    const r = await this.call<Settlement>("POST", `/v1/events/${id}/settle`, body);
+    return { settlement: r.data, synthetic: r.headers.get("x-pllay-synthetic") === "true" };
   }
 
   async getEvent(id: string) {
     return (await this.call<Settlement>("GET", `/v1/events/${id}`)).data;
   }
 
-  /** Sets the partner's webhook URL (PATCH /v1/webhooks). Rotates and returns the signing secret, shown once. */
-  async setWebhook(url: string) {
-    return (await this.call<{ webhook_url: string; webhook_secret: string }>("PATCH", "/v1/webhooks", { webhook_url: url }, { "Idempotency-Key": randomUUID() })).data;
+  async getReceipt(id: string) {
+    return (await this.call<Record<string, unknown>>("GET", `/v1/events/${id}/receipt`)).data;
+  }
+
+  /** Registers a webhook for one event type. The response carries the signing secret (shown once). */
+  async createWebhook(partnerId: string, eventType: string, url: string) {
+    return (await this.call<{ id: string; secret: string }>("POST", `/v1/partners/${partnerId}/webhooks`, { event_type: eventType, url })).data;
+  }
+
+  async deleteWebhook(partnerId: string, webhookId: string) {
+    await this.call("DELETE", `/v1/partners/${partnerId}/webhooks/${webhookId}`);
   }
 }
 
 /**
- * PLLAY's webhook signature: X-Pllay-Signature = "t=<unix seconds>,v1=<hex HMAC-SHA256(secret, `${t}.${raw body}`)>".
- * Verify against the RAW bytes, before JSON.parse, with a constant-time compare, and reject stale timestamps.
+ * PLLAY's webhook signature: X-Webhook-Signature = "sha256=" + hex(HMAC-SHA256(secret, raw request body)).
+ * Verify against the RAW bytes, before JSON.parse, with a constant-time compare.
  */
-export function verifyWebhookSignature(rawBody: string | Buffer, header: string | null | undefined, secret: string, toleranceSeconds = 300): boolean {
+export function verifyWebhookSignature(rawBody: string | Buffer, header: string | null | undefined, secret: string): boolean {
   if (!header || !secret) return false;
-  const m = /^t=(\d+),v1=([0-9a-f]+)$/.exec(header.trim());
-  if (!m) return false;
-  const t = Number(m[1]);
-  if (Math.abs(Date.now() / 1000 - t) > toleranceSeconds) return false;
-  const expected = createHmac("sha256", secret).update(`${t}.`).update(rawBody).digest("hex");
+  const expected = "sha256=" + createHmac("sha256", secret).update(rawBody).digest("hex");
   const a = Buffer.from(expected);
-  const b = Buffer.from(m[2]);
+  const b = Buffer.from(header.trim());
   return a.length === b.length && timingSafeEqual(a, b);
 }
