@@ -1,4 +1,4 @@
-// PLLAY sandbox quickstart: create an event, lock it, settle it, poll until settled, print the result and receipt link.
+// PLLAY sandbox quickstart: submit a match, poll until settled, print the result and receipt link.
 //
 //   PLLAY_API_KEY=pllay_sk_sandbox_...  PLLAY_API_BASE=<staging API base URL>  npm start
 //   npm start -- --webhook      # also run a local receiver that verifies PLLAY's webhook signature (see README)
@@ -43,7 +43,7 @@ async function pollUntilSettled(client: PllayClient, id: string, timeoutMs = 60_
   let delay = 500;
   for (;;) {
     const ev = await client.getEvent(id);
-    if (ev.state === "settled" || ev.state === "held" || ev.state === "voided" || ev.state === "reversed") return ev;
+    if (ev.state !== "processing" && ev.status !== "processing") return ev;
     if (Date.now() > deadline) throw new Error(`event ${id} still ${ev.state} after ${timeoutMs / 1000}s`);
     await sleep(delay);
     delay = Math.min(delay * 2, 5_000);
@@ -88,23 +88,15 @@ async function main(): Promise<number> {
 
   try {
     const created = await client.createEvent({
-      type: "promo",
-      path: "vod",
-      threshold: 0.8,
-      spec: { title: "Sandbox quickstart", question: "Did player A win the recorded match?" },
+      video_url: `https://example.com/pllay-quickstart/${Date.now()}.mp4`,
+      adapter: "valorant_result.json",
+      game_slug: "valorant",
+      market: { kind: "team", options: ["Sentinels", "Fnatic"] },
     });
-    console.log(`created event ${created.event_id} (${created.state})`);
-    await client.lockEvent(created.event_id);
-    console.log("locked");
-
-    // Sandbox: an empty body asks PLLAY for a deterministic synthetic outcome. A production key must send
-    // { outcome, confidence, model_version }.
-    const settleBody = client.isSandboxKey ? {} : { outcome: "yes", confidence: 0.95, model_version: "quickstart-1" };
-    const { synthetic } = await client.settleEvent(created.event_id, settleBody);
-    console.log(`settle requested${synthetic ? " (synthetic sandbox outcome)" : ""}`);
+    const synthetic = created.simulated === true;
+    console.log(`created event ${created.event_id} (${created.status}${synthetic ? ", sandbox simulated" : ""})`);
 
     const ev = await pollUntilSettled(client, created.event_id);
-    const receipt = await client.getReceipt(created.event_id).catch(() => null);
 
     if (server) {
       const until = Date.now() + 10_000;
@@ -113,9 +105,8 @@ async function main(): Promise<number> {
 
     console.log("\nresult:");
     console.log(JSON.stringify({
-      event_id: ev.event_id, state: ev.state, outcome: ev.outcome, confidence: ev.confidence, model_version: ev.model_version,
-      settlement_id: ev.settlement_id, evidence_uri: ev.evidence_uri, synthetic,
-      receipt_hash: (receipt as { receipts?: Array<{ receipt_hash?: string }> } | null)?.receipts?.[0]?.receipt_hash ?? null,
+      event_id: ev.event_id, state: ev.state, winner: ev.resolution?.outcome_label ?? null,
+      confidence: ev.resolution?.confidence ?? null, model_version: ev.resolution?.model_version ?? null, synthetic,
       webhook: server ? (deliveries.find((d) => d.event === "event.settled")?.verified ?? "not received") : "not requested",
     }, null, 2));
     console.log(`\nreceipt: ${RECEIPT_BASE}/${ev.event_id}`);

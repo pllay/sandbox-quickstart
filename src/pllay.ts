@@ -1,27 +1,34 @@
-// Thin fetch wrapper over the PLLAY settlement API (create, lock, settle, poll, receipt, webhooks). This is the whole
+// Thin fetch wrapper over the PLLAY settlement API (submit, poll, webhooks). This is the whole
 // client: no dependencies, Node 18+ global fetch.
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
-export type EventState = "open" | "locked" | "held" | "settled" | "reversed" | "voided";
+export type EventState = "processing" | "held" | "settled" | "voided" | "reversed";
 
-/** The Settlement shape every event route returns (openapi.yaml components.schemas.Event). */
+/** GET /v1/events/{id} (Resolution API v1). */
 export interface Settlement {
   event_id: string;
-  type: "promo" | "contest" | "duel";
-  path: "vod" | "live";
+  status: string;
   state: EventState;
-  spec: Record<string, unknown>;
-  outcome: string | null;
-  confidence: number | null;
-  threshold: number;
-  model_version: string | null;
-  evidence_uri: string | null;
-  settlement_id: string | null;
-  reversal_settlement_id: string | null;
-  reviewer_id: string | null;
-  stake_ref: string | null;
-  notional_minor: number;
-  reason: string | null;
+  external_market_id: string | null;
+  resolution: {
+    outcome_option_index: number | null;
+    outcome_label: string | null;
+    tier: string;
+    settleable: boolean;
+    confidence: number | null;
+    model_version: string | null;
+    adapter_version: string | null;
+    resolved_at: string | null;
+    latency_ms: number | null;
+  } | null;
+}
+
+export interface EventInput {
+  video_url: string;            // https URL of the recorded match clip
+  adapter: string;              // title adapter, e.g. "valorant_result.json"
+  game_slug?: string;
+  market: { kind: "pov" | "side" | "team"; options: string[] };
+  external_market_id?: string;
 }
 
 export class PllayApiError extends Error {
@@ -60,30 +67,13 @@ export class PllayClient {
     return { data: data as T, headers: res.headers };
   }
 
-  /** Creates an event. Idempotency-Key is required by the API; a fresh one is generated per call. */
-  async createEvent(input: { type: Settlement["type"]; path: Settlement["path"]; threshold: number; spec: Record<string, unknown>; notional_minor?: number }) {
-    return (await this.call<Settlement>("POST", "/v1/events", { notional_minor: 0, ...input }, { "Idempotency-Key": randomUUID() })).data;
-  }
-
-  async lockEvent(id: string) {
-    return (await this.call<Settlement>("POST", `/v1/events/${id}/lock`, {})).data;
-  }
-
-  /**
-   * Settles an event. With a sandbox key the body may be empty: PLLAY then returns a deterministic synthetic outcome
-   * (X-PLLAY-Synthetic: true). With a production key outcome, confidence and model_version are required.
-   */
-  async settleEvent(id: string, body: Record<string, unknown> = {}) {
-    const r = await this.call<Settlement>("POST", `/v1/events/${id}/settle`, body);
-    return { settlement: r.data, synthetic: r.headers.get("x-pllay-synthetic") === "true" };
+  /** Submits a match for resolution. Idempotency-Key is required; a fresh one is generated per call. */
+  async createEvent(input: EventInput) {
+    return (await this.call<{ event_id: string; status: string; simulated?: boolean }>("POST", "/v1/events", input, { "Idempotency-Key": randomUUID() })).data;
   }
 
   async getEvent(id: string) {
     return (await this.call<Settlement>("GET", `/v1/events/${id}`)).data;
-  }
-
-  async getReceipt(id: string) {
-    return (await this.call<Record<string, unknown>>("GET", `/v1/events/${id}/receipt`)).data;
   }
 
   /** Registers a webhook for one event type. The response carries the signing secret (shown once). */

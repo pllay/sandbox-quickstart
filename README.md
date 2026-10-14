@@ -1,8 +1,8 @@
 # PLLAY sandbox quickstart (Node + TypeScript)
 
-Creates an event, locks it, settles it, polls until it is settled, then prints the result and its receipt link. With `--webhook` it also runs a tiny local receiver that verifies PLLAY's webhook signature.
+Submits a recorded match (clip URL + title adapter + market), polls until PLLAY resolves it, then prints the winner and the receipt link. With `--webhook` it also runs a tiny local receiver that verifies PLLAY's webhook signature.
 
-**Sandbox: no cash moves and nothing is billed.** A sandbox settle is a dry run: if you send no outcome, PLLAY returns a deterministic synthetic one (`model_version: "pllay-sandbox-synthetic-v1"`, response header `X-PLLAY-Synthetic: true`). It is never a real outcome.
+**Sandbox: no cash moves and nothing is billed.** Sandbox jobs never run real Vision: PLLAY simulates the resolution in about 3 seconds (`simulated: true` on create, `model_version: "pllay-fake-vision-sandbox-v1"`). The clip URL is not fetched, so any https URL works. It is never a real outcome.
 
 Developer docs: <https://pllay.io/developers>
 
@@ -37,21 +37,23 @@ Requires Node 18.17 or later.
 
 ```bash
 npm install
-npm start                 # create -> lock -> settle -> poll -> result + receipt link
+npm start                 # submit -> poll -> result + receipt link
 npm start -- --webhook    # also receive and verify event.settled
 ```
 
 Output ends with something like:
 
 ```
+created event … (processing, sandbox simulated)
+
 result:
-{ "event_id": "…", "state": "settled", "outcome": "yes", "confidence": 0.9712,
-  "model_version": "pllay-sandbox-synthetic-v1", "synthetic": true, "receipt_hash": "…", "webhook": true }
+{ "event_id": "…", "state": "settled", "winner": "Sentinels", "confidence": 97,
+  "model_version": "pllay-fake-vision-sandbox-v1", "synthetic": true, "webhook": "not requested" }
 
 receipt: https://pllay.io/receipt/<event_id>
 ```
 
-The same event id always gets the same synthetic outcome. To test a specific branch, send your own `outcome` (`yes` / `no` / `void`), `confidence` and `model_version` in the settle body: the sandbox keeps them, and still flags the settle as synthetic.
+Supported adapters include `valorant_result.json`, `lol_result.json`, `fortnite_result.json`, `cs2_matchresult.json` and more (an unsupported one returns `422` listing them all). `market.kind` is `team`, `side` or `pov`, with at least two string options.
 
 ## Webhooks
 
@@ -70,12 +72,12 @@ PLLAY has to reach the receiver, so `PLLAY_WEBHOOK_URL` must be public, for exam
 
 ## Limits
 
-Per sandbox key: 60 requests per minute (`429 rate_limit_exceeded`) and 1,000 settles per UTC day (`429 sandbox_daily_limit_exceeded`, with `reset_in_seconds`). On create, `notional_minor` must be `0`.
+Per sandbox key: 60 requests per minute (`429 rate_limit_exceeded`) and 1,000 settles per UTC day (`429 sandbox_daily_limit_exceeded`, with `reset_in_seconds`).
 
 ## Notes
 
 - The client (`src/pllay.ts`) is a thin `fetch` wrapper with no runtime dependencies. Copy it into your own project if you like.
-- `GET /v1/events/{id}/receipt` returns the canonical receipt and its hash. Sandbox receipts are never anchored.
+- `GET /v1/events/{id}` returns the state and resolution. The public receipt page is `https://pllay.io/receipt/{event_id}`. Sandbox receipts are never anchored.
 
 ## License
 
