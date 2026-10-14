@@ -18,7 +18,7 @@ Sandbox keys only work on the **staging** API. Production (`https://api.pllay.io
 
 ```bash
 export PLLAY_API_KEY="pllay_sk_sandbox_…"          # read from the environment only; never printed
-export PLLAY_API_BASE="<staging API base URL>"
+export PLLAY_API_BASE="<staging API base URL>"   # the oracle-settlement function: https://<staging-ref>.supabase.co/functions/v1/oracle-settlement
 ```
 
 Or copy them into a local `.env` file and load it with your shell; `.env` is git-ignored.
