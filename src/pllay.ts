@@ -35,7 +35,7 @@ export interface CreateEventInput {
   type: Settlement["type"];
   path: Settlement["path"];
   threshold?: number;
-  spec: Record<string, unknown>;
+  spec: object;
   stake_ref?: string | null;
   notional_minor?: number;
 }
