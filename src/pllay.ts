@@ -4,6 +4,12 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 export type EventState = "open" | "locked" | "held" | "settled" | "reversed" | "voided";
 
+/**
+ * Fields the settlement server sets itself. A client value is refused with 422 server_locked_field.
+ * They still appear on responses once the server has set them.
+ */
+export const SERVER_LOCKED_FIELDS = ["threshold", "outcome", "confidence", "model_version"] as const;
+
 /** The Settlement shape every event route returns (openapi.yaml components.schemas.Event). */
 export interface Settlement {
   event_id: string;
@@ -22,6 +28,33 @@ export interface Settlement {
   stake_ref: string | null;
   notional_minor: number;
   reason: string | null;
+}
+
+/** Client body for POST /v1/events. `threshold` is optional only so older callers still typecheck; it is never sent. */
+export interface CreateEventInput {
+  type: Settlement["type"];
+  path: Settlement["path"];
+  threshold?: number;
+  spec: object;
+  stake_ref?: string | null;
+  notional_minor?: number;
+}
+
+/** Client body for POST /v1/events/{id}/settle. Outcome, confidence, and model_version are not accepted. */
+export interface SettleEventInput {
+  evidence_uri?: string | null;
+  reviewer_id?: string | null;
+  evidence?: Record<string, unknown> | null;
+}
+
+function withoutServerLockedFields(body: object): Record<string, unknown> {
+  const locked = new Set<string>(SERVER_LOCKED_FIELDS);
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(body)) {
+    if (locked.has(key) || value === undefined) continue;
+    out[key] = value;
+  }
+  return out;
 }
 
 export class PllayApiError extends Error {
@@ -61,8 +94,9 @@ export class PllayClient {
   }
 
   /** Creates an event. Idempotency-Key is required by the API; a fresh one is generated per call. */
-  async createEvent(input: { type: Settlement["type"]; path: Settlement["path"]; threshold: number; spec: Record<string, unknown>; notional_minor?: number }) {
-    return (await this.call<Settlement>("POST", "/v1/events", { notional_minor: 0, ...input }, { "Idempotency-Key": randomUUID() })).data;
+  async createEvent(input: CreateEventInput) {
+    const body = withoutServerLockedFields({ notional_minor: 0, ...input });
+    return (await this.call<Settlement>("POST", "/v1/events", body, { "Idempotency-Key": randomUUID() })).data;
   }
 
   async lockEvent(id: string) {
@@ -70,11 +104,12 @@ export class PllayClient {
   }
 
   /**
-   * Settles an event. With a sandbox key the body may be empty: PLLAY then returns a deterministic synthetic outcome
-   * (X-PLLAY-Synthetic: true). With a production key outcome, confidence and model_version are required.
+   * Settles an event. Send an empty object. The server sets outcome, confidence, and model_version.
+   * A sandbox settle is synthetic (response header X-PLLAY-Synthetic: true). Do not send those fields
+   * for a sandbox key or a production key: the server owns them.
    */
-  async settleEvent(id: string, body: Record<string, unknown> = {}) {
-    const r = await this.call<Settlement>("POST", `/v1/events/${id}/settle`, body);
+  async settleEvent(id: string, body: SettleEventInput = {}) {
+    const r = await this.call<Settlement>("POST", `/v1/events/${id}/settle`, withoutServerLockedFields(body));
     return { settlement: r.data, synthetic: r.headers.get("x-pllay-synthetic") === "true" };
   }
 

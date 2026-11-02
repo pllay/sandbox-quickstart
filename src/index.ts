@@ -1,11 +1,13 @@
 // PLLAY sandbox quickstart: create an event, lock it, settle it, poll until settled, print the result and receipt link.
 //
 //   PLLAY_API_KEY=pllay_sk_sandbox_...  PLLAY_API_BASE=<staging API base URL>  npm start
+//   npm start -- --game-slug fortnite
 //   npm start -- --webhook      # also run a local receiver that verifies PLLAY's webhook signature (see README)
 //
 // The key is read from the environment only and never printed.
 import { createServer, type Server } from "node:http";
 import { PllayApiError, PllayClient, type Settlement, verifyWebhookSignature } from "./pllay.js";
+import { certificationBlockedMessage, quickstartChoice } from "./quickstart.js";
 
 const DEFAULT_BASE = "https://api.pllay.io";
 const RECEIPT_BASE = "https://pllay.io/receipt";
@@ -86,21 +88,28 @@ async function main(): Promise<number> {
     }
   }
 
+  const choice = quickstartChoice(process.argv.slice(2), env("PLLAY_GAME_SLUG"), env("PLLAY_POV_SIDE"));
+  if (!choice.ok) {
+    console.error(choice.message);
+    return 2;
+  }
+
+  let eventId: string | undefined;
   try {
+    const spec: Record<string, unknown> = { ...choice.spec };
+    console.log(`creating ${choice.spec.game_slug}${choice.spec.pov_side ? ` pov_side=${choice.spec.pov_side}` : ""}`);
     const created = await client.createEvent({
       type: "promo",
       path: "vod",
-      threshold: 0.8,
-      spec: { title: "Sandbox quickstart", question: "Did player A win the recorded match?" },
+      spec,
     });
+    eventId = created.event_id;
     console.log(`created event ${created.event_id} (${created.state})`);
     await client.lockEvent(created.event_id);
     console.log("locked");
 
-    // Sandbox: an empty body asks PLLAY for a deterministic synthetic outcome. A production key must send
-    // { outcome, confidence, model_version }.
-    const settleBody = client.isSandboxKey ? {} : { outcome: "yes", confidence: 0.95, model_version: "quickstart-1" };
-    const { synthetic } = await client.settleEvent(created.event_id, settleBody);
+    // Empty body. The server sets outcome, confidence, and model_version for sandbox and production keys.
+    const { synthetic } = await client.settleEvent(created.event_id, {});
     console.log(`settle requested${synthetic ? " (synthetic sandbox outcome)" : ""}`);
 
     const ev = await pollUntilSettled(client, created.event_id);
@@ -124,6 +133,7 @@ async function main(): Promise<number> {
     if (e instanceof PllayApiError) {
       console.error(`PLLAY API error ${e.message}`);
       if (e.code === "sandbox_keys_disabled") console.error("This deployment does not accept sandbox keys: point PLLAY_API_BASE at staging.");
+      if (e.code === "certification_blocked") console.error(certificationBlockedMessage(choice.gameSlug, eventId));
     } else {
       console.error(e instanceof Error ? e.message : String(e));
     }
