@@ -90,17 +90,14 @@ async function main(): Promise<number> {
     const created = await client.createEvent({
       type: "promo",
       path: "vod",
-      threshold: 0.8,
       spec: { title: "Sandbox quickstart", question: "Did player A win the recorded match?" },
     });
     console.log(`created event ${created.event_id} (${created.state})`);
     await client.lockEvent(created.event_id);
     console.log("locked");
 
-    // Sandbox: an empty body asks PLLAY for a deterministic synthetic outcome. A production key must send
-    // { outcome, confidence, model_version }.
-    const settleBody = client.isSandboxKey ? {} : { outcome: "yes", confidence: 0.95, model_version: "quickstart-1" };
-    const { synthetic } = await client.settleEvent(created.event_id, settleBody);
+    // Empty body. The server sets outcome, confidence, and model_version for sandbox and production keys.
+    const { synthetic } = await client.settleEvent(created.event_id, {});
     console.log(`settle requested${synthetic ? " (synthetic sandbox outcome)" : ""}`);
 
     const ev = await pollUntilSettled(client, created.event_id);
